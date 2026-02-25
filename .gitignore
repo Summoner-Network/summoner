@@ -5,6 +5,7 @@ native_build
 summoner-sdk
 tests
 logs/
+digital_twin/workspace/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
