@@ -153,6 +153,15 @@ def _save_owner_id(owner: Any) -> None:
     OWNER_ID_PATH.write_text(json.dumps({"owner_id": owner}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _ensure_workspace() -> None:
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    DAYBYDAY_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ["SOUL.md", "USER.md", "MEMORY.md", "GOALS.md", "SELF.md", "REPORT.md", "HEARTBEAT.md"]:
+        path = WORKSPACE_DIR / name
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+
+
 def _extract_text_from_openai_response(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -622,6 +631,8 @@ if __name__ == "__main__":
 
     if args.model_id:
         MODEL_ID = args.model_id
+
+    _ensure_workspace()
 
     # Start visual window (browser) and build graph from dna
     viz.attach_logger(client.logger)
