@@ -75,8 +75,6 @@ NEGOTIATION_QUEUE: list[dict] = []
 negotiation_lock = asyncio.Lock()
 PLAN_REPLY_QUEUE: list[dict] = []
 plan_reply_lock = asyncio.Lock()
-_last_plan_request_ts: float = 0.0
-PLAN_REQUEST_COOLDOWN_SEC = 30.0
 _cached_plan_request: Optional[dict] = None
 _cached_goals_mtime: Optional[float] = None
 
@@ -911,17 +909,15 @@ async def send_follow_up() -> Optional[dict]:
     return item
 
 async def _build_plan_request() -> Optional[dict]:
-    global _last_plan_request_ts, _cached_plan_request, _cached_goals_mtime
+    global _cached_plan_request, _cached_goals_mtime
     client.logger.info("[send on hello] triggered; building plan request")
 
     now = asyncio.get_event_loop().time()
-    if now - _last_plan_request_ts < PLAN_REQUEST_COOLDOWN_SEC:
-        return None
     await asyncio.sleep(1.0)
     goals_path = WORKSPACE_DIR / "GOALS.md"
     goals_text = _read_text(goals_path)
     summary = await _summarize_goals_text(goals_text)
-    client.logger.info(f"[plan req] now={now:.3f} last={_last_plan_request_ts:.3f} cooldown={PLAN_REQUEST_COOLDOWN_SEC}")
+    client.logger.info(f"[plan req] now={now:.3f}")
     client.logger.info(f"[plan req] goals_text_len={len(goals_text)}")
     client.logger.info(f"[plan req] summary_len={len(summary) if summary else 0}")
     if not summary:
@@ -929,7 +925,6 @@ async def _build_plan_request() -> Optional[dict]:
             summary = "No goals provided yet."
         else:
             summary = "Goals were provided but summarization returned empty."
-    _last_plan_request_ts = now
     payload = {
         "intent": "request",
         "to": None,
@@ -949,19 +944,14 @@ async def send_plan_request_on_hello() -> Optional[dict]:
 
 @client.send(route="hello")
 async def send_plan_request_while_idle() -> Optional[dict]:
-    global _last_plan_request_ts, _cached_plan_request, _cached_goals_mtime
+    global _cached_plan_request, _cached_goals_mtime
     client.logger.info(f"[send idle] states={states} hello_in={'hello' in states}")
     await asyncio.sleep(0.5)
     if "hello" not in states:
         return None
-    now = asyncio.get_event_loop().time()
-    client.logger.info(f"[send idle] now={now:.3f} last={_last_plan_request_ts:.3f} cooldown={PLAN_REQUEST_COOLDOWN_SEC}")
-    if now - _last_plan_request_ts < PLAN_REQUEST_COOLDOWN_SEC:
-        return None
     goals_path = WORKSPACE_DIR / "GOALS.md"
     current_mtime = _file_mtime(goals_path)
     if _cached_plan_request and _cached_goals_mtime == current_mtime:
-        _last_plan_request_ts = now
         return _cached_plan_request
     _cached_plan_request = None
     _cached_goals_mtime = None
