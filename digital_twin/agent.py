@@ -1,4 +1,4 @@
-import argparse, json, asyncio
+import argparse, json, asyncio, random
 from typing import Any, Optional
 from pathlib import Path
 from datetime import datetime, timezone
@@ -16,6 +16,7 @@ ID_PATH = BASE_DIR / "id.json"
 OWNER_ID_PATH = BASE_DIR / "owner_id.json"
 WORKSPACE_DIR = BASE_DIR / "workspace"
 DAYBYDAY_DIR = WORKSPACE_DIR / "daybyday"
+MEMORY_DIR = WORKSPACE_DIR / "memory"
 
 load_dotenv()
 
@@ -57,7 +58,7 @@ curl https://api.openai.com/v1/responses \
 
 MODEL_ID = "gpt-4o"
 
-viz = ClientFlowVisualizer(title=f"{AGENT_ID} Graph", port=8710)
+viz = ClientFlowVisualizer(title=f"{AGENT_ID} Graph", port=random.randint(7777,8887))
 
 client = SummonerClient(name=AGENT_ID)
 
@@ -70,6 +71,8 @@ FOLLOW_UP_QUEUE: list[dict] = []
 follow_up_lock = asyncio.Lock()
 NEGOTIATION_QUEUE: list[dict] = []
 negotiation_lock = asyncio.Lock()
+PLAN_REPLY_QUEUE: list[dict] = []
+plan_reply_lock = asyncio.Lock()
 _last_plan_request_ts: float = 0.0
 PLAN_REQUEST_COOLDOWN_SEC = 30.0
 _cached_plan_request: Optional[dict] = None
@@ -156,10 +159,61 @@ def _save_owner_id(owner: Any) -> None:
 def _ensure_workspace() -> None:
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     DAYBYDAY_DIR.mkdir(parents=True, exist_ok=True)
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     for name in ["SOUL.md", "USER.md", "MEMORY.md", "GOALS.md", "SELF.md", "REPORT.md", "HEARTBEAT.md"]:
         path = WORKSPACE_DIR / name
         if not path.exists():
             path.write_text("", encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _memory_json_text(blob: dict) -> str:
+    if not isinstance(blob, dict):
+        return ""
+    summary = blob.get("summary", "")
+    entries = blob.get("entries", [])
+    parts: list[str] = []
+    if isinstance(summary, str) and summary.strip():
+        parts.append("Summary:")
+        parts.append(summary.strip())
+    if isinstance(entries, list) and entries:
+        parts.append("Entries:")
+        for item in entries:
+            if isinstance(item, str) and item.strip():
+                parts.append(f"- {item.strip()}")
+    return "\n".join(parts).strip()
+
+
+async def _append_or_compact_json(path: Path, new_text: str, token_limit: int) -> None:
+    if not new_text:
+        return
+    blob = _read_json(path)
+    entries = blob.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    entries.append(new_text)
+    blob["entries"] = entries
+    combined = _memory_json_text(blob)
+    if _count_tokens(combined) <= token_limit:
+        _write_json(path, blob)
+        return
+    compacted = await _compact_markdown(path, combined, "")
+    if compacted:
+        blob = {"summary": compacted, "entries": []}
+        _write_json(path, blob)
 
 
 def _extract_text_from_openai_response(payload: dict) -> str:
@@ -259,6 +313,71 @@ async def _assess_response_interest(response_text: str) -> bool:
     except Exception as e:
         client.logger.info(f"[llm:openai] response interest error: {e}")
         return False
+
+
+async def _plan_discussion(msg: Any) -> dict:
+    today = datetime.now(timezone.utc).date()
+    yesterday = today.fromordinal(today.toordinal() - 1)
+    today_path = MEMORY_DIR / f"{today.isoformat()}.json"
+    yesterday_path = MEMORY_DIR / f"{yesterday.isoformat()}.json"
+
+    report = _read_text(WORKSPACE_DIR / "REPORT.md")
+    lt_memory = _read_text(WORKSPACE_DIR / "MEMORY.md")
+    goals = _read_text(WORKSPACE_DIR / "GOALS.md")
+    self_text = _read_text(WORKSPACE_DIR / "SELF.md")
+    user_text = _read_text(WORKSPACE_DIR / "USER.md")
+    soul_text = _read_text(WORKSPACE_DIR / "SOUL.md")
+    today_mem = _memory_json_text(_read_json(today_path))
+    yday_mem = _memory_json_text(_read_json(yesterday_path))
+
+    system = (
+        "You are a digital twin collaborating with another agent to brainstorm strategies. "
+        "Use the context to propose options, converge on the best strategy, and respond clearly. "
+        "Return a JSON object with keys: reply, report, lt_memory, st_memory, decision. "
+        "report = delta insights for REPORT.md. lt_memory = durable facts for MEMORY.md. "
+        "st_memory = short-term notes for today. decision = current best strategy in 1-3 sentences."
+    )
+    user = (
+        "Context:\n"
+        f"GOALS:\n{goals}\n\n"
+        f"SELF:\n{self_text}\n\n"
+        f"USER:\n{user_text}\n\n"
+        f"SOUL:\n{soul_text}\n\n"
+        f"REPORT:\n{report}\n\n"
+        f"MEMORY:\n{lt_memory}\n\n"
+        f"MEMORY_TODAY:\n{today_mem}\n\n"
+        f"MEMORY_YESTERDAY:\n{yday_mem}\n\n"
+        "Incoming message:\n"
+        f"{_message_text(msg)}"
+    )
+    try:
+        s = await openai_client.call({
+            "model_id": MODEL_ID,
+            "system": system,
+            "user": user,
+        })
+        text = _extract_text_from_openai_response(s.response_json)
+        data = json.loads(text)
+        return {
+            "reply": str(data.get("reply", "")).strip(),
+            "report": str(data.get("report", "")).strip(),
+            "lt_memory": str(data.get("lt_memory", "")).strip(),
+            "st_memory": str(data.get("st_memory", "")).strip(),
+            "decision": str(data.get("decision", "")).strip(),
+        }
+    except Exception as e:
+        client.logger.info(f"[llm:openai] plan discussion error: {e}")
+        return {"reply": "", "report": "", "lt_memory": "", "st_memory": "", "decision": ""}
+
+
+async def _update_plan_memory(report: str, lt_memory: str, st_memory: str) -> None:
+    if report:
+        await _append_or_compact(WORKSPACE_DIR / "REPORT.md", report, token_limit=600)
+    if lt_memory:
+        await _append_or_compact(WORKSPACE_DIR / "MEMORY.md", lt_memory, token_limit=1200)
+    if st_memory:
+        date_str = datetime.now(timezone.utc).date().isoformat()
+        await _append_or_compact_json(MEMORY_DIR / f"{date_str}.json", st_memory, token_limit=600)
 
 
 async def _compact_markdown(path: Path, existing: str, incoming: str) -> str:
@@ -412,7 +531,8 @@ async def validate(msg: Any) -> Optional[dict]:
     if not isinstance(content, dict):
         return
 
-    if content.get("to") != AGENT_ID_OBJ:
+    to = content.get("to")
+    if to not in (None, AGENT_ID_OBJ):
         return
 
     if "from" not in content:
@@ -426,7 +546,7 @@ states: list[str] = ["learn"]
 
 
 @client.upload_states()
-async def upload_states(_: Any) -> list[str]:
+async def upload_states(m: Any) -> list[str]:
     viz.push_states(states)
     return states
 
@@ -438,15 +558,21 @@ async def download_states(possible_states: list[Node]) -> None:
     new_states = [s for s in incoming if s not in states]
     if not new_states:
         viz.push_states(states)
+        client.logger.info(f"[states] incoming={incoming}")
+        client.logger.info(f"[states] updated={states} hello_in={ 'hello' in states }")
         return states
     states = new_states
     viz.push_states(states)
+    client.logger.info(f"[states] incoming={incoming}")
+    client.logger.info(f"[states] updated={states} hello_in={ 'hello' in states }")
     return states
 
 
 @client.receive(route="learn --> hello")
 async def on_learn_to_hello(msg: Any) -> Event:
     global OWNER_ID
+    if isinstance(msg, dict) and msg.get("to") != AGENT_ID_OBJ:
+        return Stay(Trigger.ok)
     if OWNER_ID is None:
         OWNER_ID = msg.get("from")
         if OWNER_ID is not None:
@@ -454,14 +580,17 @@ async def on_learn_to_hello(msg: Any) -> Event:
 
     msg_text = _message_text(msg)
     if "/goplan" in msg_text:
+        client.logger.info("[travel] start to 187.77.102.80:8888")
+        t0 = asyncio.get_event_loop().time()
         await client.travel_to(host="187.77.102.80", port=8888)
+        client.logger.info(f"[travel] done in {asyncio.get_event_loop().time()-t0:.2f}s")
         return Move(Trigger.ok)
 
     client.logger.info(msg)
 
     result = await extract_memory(msg)
-    print("[digital_twin] extraction result:")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    # print("[digital_twin] extraction result:")
+    # print(json.dumps(result, indent=2, ensure_ascii=False))
 
     goals = _normalize_value(result.get("goals"))
     heartbeat = _normalize_value(result.get("heartbeat"))
@@ -503,6 +632,8 @@ async def on_learn_to_hello(msg: Any) -> Event:
 
 @client.receive(route="hello --> plan")
 async def on_hello_to_plan(msg: Any) -> Event:
+    client.logger.info("[send on hello] triggered; building plan request")
+
     if not isinstance(msg, dict):
         return Stay(Trigger.ok)
 
@@ -516,11 +647,23 @@ async def on_hello_to_plan(msg: Any) -> Event:
         our_goals = _read_text(WORKSPACE_DIR / "GOALS.md")
         align, rationale = await _assess_goal_alignment(str(their_goals), our_goals)
         if align:
+            plan = await _plan_discussion(msg)
+            await _update_plan_memory(plan.get("report", ""), plan.get("lt_memory", ""), plan.get("st_memory", ""))
+            decision = plan.get("decision", "")
+            reply = plan.get("reply", "")
+            msg_text = "I think our goals align and I'd like to discuss."
+            if rationale:
+                msg_text = f"{msg_text} {rationale}"
+            if decision:
+                msg_text = f"{msg_text} Initial strategy: {decision}"
+            if reply:
+                msg_text = f"{msg_text}\n\n{reply}"
             async with negotiation_lock:
                 NEGOTIATION_QUEUE.append({
                     "to": sender,
                     "assessment": rationale,
                     "their_goals": str(their_goals),
+                    "message": msg_text,
                 })
             return Move(Trigger.ok)
         return Stay(Trigger.ok)
@@ -531,6 +674,22 @@ async def on_hello_to_plan(msg: Any) -> Event:
         willing = await _assess_response_interest(_message_text(msg))
         return Move(Trigger.ok) if willing else Stay(Trigger.ok)
 
+    return Stay(Trigger.ok)
+
+
+@client.receive(route="plan")
+async def on_plan(msg: Any) -> Event:
+    if not isinstance(msg, dict):
+        return Stay(Trigger.ok)
+    plan = await _plan_discussion(msg)
+    await _update_plan_memory(plan.get("report", ""), plan.get("lt_memory", ""), plan.get("st_memory", ""))
+    reply = plan.get("reply", "")
+    decision = plan.get("decision", "")
+    if decision:
+        reply = f"{reply}\n\nCurrent best strategy: {decision}".strip()
+    if reply:
+        async with plan_reply_lock:
+            PLAN_REPLY_QUEUE.append({"to": msg.get("from"), "message": reply})
     return Stay(Trigger.ok)
 
 @client.send(route="learn --> hello", on_actions={Action.STAY}, on_triggers={Trigger.ok})
@@ -546,16 +705,24 @@ async def send_follow_up() -> Optional[dict]:
 
 async def _build_plan_request() -> Optional[dict]:
     global _last_plan_request_ts, _cached_plan_request, _cached_goals_mtime
+    client.logger.info("[send on hello] triggered; building plan request")
+
     now = asyncio.get_event_loop().time()
     if now - _last_plan_request_ts < PLAN_REQUEST_COOLDOWN_SEC:
         return None
-    _last_plan_request_ts = now
     await asyncio.sleep(1.0)
     goals_path = WORKSPACE_DIR / "GOALS.md"
     goals_text = _read_text(goals_path)
     summary = await _summarize_goals_text(goals_text)
+    client.logger.info(f"[plan req] now={now:.3f} last={_last_plan_request_ts:.3f} cooldown={PLAN_REQUEST_COOLDOWN_SEC}")
+    client.logger.info(f"[plan req] goals_text_len={len(goals_text)}")
+    client.logger.info(f"[plan req] summary_len={len(summary) if summary else 0}")
     if not summary:
-        return None
+        if not goals_text.strip():
+            summary = "No goals provided yet."
+        else:
+            summary = "Goals were provided but summarization returned empty."
+    _last_plan_request_ts = now
     payload = {
         "intent": "request",
         "to": None,
@@ -576,10 +743,12 @@ async def send_plan_request_on_hello() -> Optional[dict]:
 @client.send(route="hello")
 async def send_plan_request_while_idle() -> Optional[dict]:
     global _last_plan_request_ts, _cached_plan_request, _cached_goals_mtime
+    client.logger.info(f"[send idle] states={states} hello_in={'hello' in states}")
     await asyncio.sleep(0.5)
     if "hello" not in states:
         return None
     now = asyncio.get_event_loop().time()
+    client.logger.info(f"[send idle] now={now:.3f} last={_last_plan_request_ts:.3f} cooldown={PLAN_REQUEST_COOLDOWN_SEC}")
     if now - _last_plan_request_ts < PLAN_REQUEST_COOLDOWN_SEC:
         return None
     goals_path = WORKSPACE_DIR / "GOALS.md"
@@ -602,13 +771,28 @@ async def send_plan_response() -> Optional[dict]:
     if not item or not item.get("to"):
         return None
     assessment = item.get("assessment", "")
-    msg = "I think our goals align and I'd like to discuss."
-    if assessment:
+    msg = item.get("message") or "I think our goals align and I'd like to discuss."
+    if assessment and msg == "I think our goals align and I'd like to discuss.":
         msg = f"{msg} {assessment}"
     return {
         "intent": "response",
         "to": item["to"],
         "message": msg,
+    }
+
+
+@client.send(route="plan", on_actions={Action.STAY}, on_triggers={Trigger.ok})
+async def send_plan_message() -> Optional[dict]:
+    await asyncio.sleep(0.5)
+    async with plan_reply_lock:
+        if not PLAN_REPLY_QUEUE:
+            return None
+        item = PLAN_REPLY_QUEUE.pop(0)
+    if not item or not item.get("message"):
+        return None
+    return {
+        "to": item.get("to"),
+        "message": item["message"],
     }
 
 
