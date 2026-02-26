@@ -1,7 +1,9 @@
-import argparse, json, asyncio, random
+import argparse, json, asyncio, random, threading, time
 from typing import Any, Optional
 from pathlib import Path
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import webbrowser
 
 from summoner.client import SummonerClient
 from summoner.protocol import Event, Direction, Move, Stay, Action, Node
@@ -77,6 +79,14 @@ _last_plan_request_ts: float = 0.0
 PLAN_REQUEST_COOLDOWN_SEC = 30.0
 _cached_plan_request: Optional[dict] = None
 _cached_goals_mtime: Optional[float] = None
+
+# Report dashboard state
+_report_lock = threading.Lock()
+_report_snapshot = {
+    "agent_id": AGENT_ID,
+    "updated_at": "",
+    "report": "",
+}
 
 if OWNER_ID_PATH.exists():
     try:
@@ -164,6 +174,170 @@ def _ensure_workspace() -> None:
         path = WORKSPACE_DIR / name
         if not path.exists():
             path.write_text("", encoding="utf-8")
+
+
+def _refresh_report_snapshot() -> None:
+    report = _read_text(WORKSPACE_DIR / "REPORT.md")
+    with _report_lock:
+        _report_snapshot["agent_id"] = AGENT_ID
+        _report_snapshot["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        _report_snapshot["report"] = report
+
+
+def start_report_dashboard(
+    port_range: tuple[int, int] = (4567, 5567),
+    tries: int = 40
+) -> tuple[ThreadingHTTPServer, int]:
+    import socket
+
+    html = r"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Digital Twin Report</title>
+  <style>
+    :root {
+      --bg: #f5f3ef;
+      --card: #ffffff;
+      --ink: #1e1e1e;
+      --muted: #666;
+      --accent: #2b5d8a;
+      --border: #e4e1da;
+    }
+    body {
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+      background: linear-gradient(180deg, #f5f3ef 0%, #efece6 100%);
+      color: var(--ink);
+      margin: 0;
+      padding: 24px;
+    }
+    .frame {
+      max-width: 980px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.06);
+      padding: 22px 26px 28px;
+    }
+    .title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 22px;
+      letter-spacing: 0.3px;
+      margin: 0;
+      color: var(--accent);
+    }
+    .meta {
+      font-size: 12px;
+      color: var(--muted);
+      text-align: right;
+    }
+    .report {
+      white-space: pre-wrap;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+      line-height: 1.5;
+      font-size: 15px;
+      background: #faf9f6;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .footer {
+      margin-top: 12px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <div class="title">
+      <h1>Digital Twin Report</h1>
+      <div class="meta">
+        <div>Agent: <span id="agent_id" class="mono"></span></div>
+        <div>Updated: <span id="updated_at"></span></div>
+      </div>
+    </div>
+    <div id="report" class="report"></div>
+    <div class="footer">Auto-refresh every 2s</div>
+  </div>
+
+<script>
+async function refresh() {
+  const r = await fetch("/state");
+  const s = await r.json();
+  document.getElementById("agent_id").textContent = s.agent_id || "";
+  document.getElementById("updated_at").textContent = s.updated_at || "";
+  document.getElementById("report").textContent = s.report || "";
+}
+setInterval(refresh, 2000);
+refresh();
+</script>
+</body>
+</html>
+"""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/" or self.path.startswith("/?"):
+                body = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if self.path == "/state":
+                with _report_lock:
+                    payload = json.dumps(_report_snapshot).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            return
+
+    def _pick_free_port(lo: int, hi: int, tries_: int) -> int:
+        for _ in range(tries_):
+            p = random.randint(lo, hi)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("127.0.0.1", p))
+                    return p
+                except OSError:
+                    continue
+        raise RuntimeError(f"Could not find a free port in [{lo},{hi}] after {tries_} tries")
+
+    lo, hi = port_range
+    last_err: Optional[Exception] = None
+    for _ in range(max(1, tries)):
+        port = _pick_free_port(lo, hi, 1)
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            return server, port
+        except OSError as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(f"Failed to start report dashboard in range [{lo},{hi}]") from last_err
 
 
 def _read_json(path: Path) -> dict:
@@ -373,6 +547,8 @@ async def _plan_discussion(msg: Any) -> dict:
 async def _update_plan_memory(report: str, lt_memory: str, st_memory: str) -> None:
     if report:
         await _append_or_compact(WORKSPACE_DIR / "REPORT.md", report, token_limit=600)
+        _refresh_report_snapshot()
+        _refresh_report_snapshot()
     if lt_memory:
         await _append_or_compact(WORKSPACE_DIR / "MEMORY.md", lt_memory, token_limit=1200)
     if st_memory:
@@ -817,6 +993,9 @@ if __name__ == "__main__":
         MODEL_ID = args.model_id
 
     _ensure_workspace()
+    _refresh_report_snapshot()
+    report_server, report_port = start_report_dashboard()
+    webbrowser.open(f"http://127.0.0.1:{report_port}")
 
     # Start visual window (browser) and build graph from dna
     viz.attach_logger(client.logger)
