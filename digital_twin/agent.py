@@ -1,4 +1,4 @@
-import argparse, json, asyncio, random, threading, time
+import argparse, json, asyncio, random, threading, time, os
 from typing import Any, Optional
 from pathlib import Path
 from datetime import datetime, timezone
@@ -58,7 +58,36 @@ curl https://api.openai.com/v1/responses \
   }'
 """)
 
+notion_list_blocks = compiler.parse(r"""
+curl -H "Authorization: Bearer $NOTION_TOKEN" \
+     -H "Notion-Version: 2022-06-28" \
+     "https://api.notion.com/v1/blocks/$NOTION_PAGE_ID/children?page_size=100"
+""")
+
+notion_list_blocks_with_cursor = compiler.parse(r"""
+curl -H "Authorization: Bearer $NOTION_TOKEN" \
+     -H "Notion-Version: 2022-06-28" \
+     "https://api.notion.com/v1/blocks/$NOTION_PAGE_ID/children?page_size=100&start_cursor={{start_cursor}}"
+""")
+
+notion_delete_block = compiler.parse(r"""
+curl -X DELETE -H "Authorization: Bearer $NOTION_TOKEN" \
+     -H "Notion-Version: 2022-06-28" \
+     "https://api.notion.com/v1/blocks/{{block_id}}"
+""")
+
+notion_append_blocks = compiler.parse(r"""
+curl -X PATCH "https://api.notion.com/v1/blocks/$NOTION_PAGE_ID/children" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Notion-Version: 2022-06-28" \
+  --data '{{payload}}'
+""")
+
 MODEL_ID = "gpt-4o"
+NOTION_ENABLED = os.getenv("NOTION_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "").strip()
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
 
 viz = ClientFlowVisualizer(title=f"{AGENT_ID} Graph", port=random.randint(7777,8887))
 
@@ -75,8 +104,12 @@ NEGOTIATION_QUEUE: list[dict] = []
 negotiation_lock = asyncio.Lock()
 PLAN_REPLY_QUEUE: list[dict] = []
 plan_reply_lock = asyncio.Lock()
-_cached_plan_request: Optional[dict] = None
-_cached_goals_mtime: Optional[float] = None
+request_arbitration_lock = asyncio.Lock()
+LAST_REQUEST_TS: Optional[float] = None
+LAST_REQUEST_ID: Optional[str] = None
+WAITING_FOR_RESPONSE: bool = False
+ACTIVE_CHAIN_NONCE: Optional[str] = None
+EXPECTED_CHAIN_NONCE: Optional[str] = None
 
 # Report dashboard state
 _report_lock = threading.Lock()
@@ -151,13 +184,6 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8").strip()
     except Exception:
         return ""
-
-
-def _file_mtime(path: Path) -> Optional[float]:
-    try:
-        return path.stat().st_mtime
-    except Exception:
-        return None
 
 
 def _save_owner_id(owner: Any) -> None:
@@ -381,6 +407,10 @@ def _memory_json_text(blob: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _new_nonce() -> str:
+    return f"{int(time.time() * 1000)}-{random.randint(100000, 999999)}"
+
+
 async def _append_or_compact_json(path: Path, new_text: str, token_limit: int) -> None:
     if not new_text:
         return
@@ -451,7 +481,7 @@ async def _summarize_goals_text(goals_text: str) -> str:
         text = _extract_text_from_openai_response(s.response_json)
         return text.strip()
     except Exception as e:
-        client.logger.info(f"[llm:openai] goals summary error: {e}")
+        client.logger.warning(f"[llm:openai] goals summary error: {e}")
         return goals_text
 
 
@@ -488,7 +518,7 @@ async def _assess_goal_alignment(their_goals: str, our_goals: str) -> tuple[bool
             return False, rationale
         return True, rationale
     except Exception as e:
-        client.logger.info(f"[llm:openai] alignment error: {e}")
+        client.logger.warning(f"[llm:openai] alignment error: {e}")
         return True, ""
 
 
@@ -505,10 +535,10 @@ async def _assess_response_interest(response_text: str) -> bool:
         })
         text = _extract_text_from_openai_response(s.response_json)
         data = json.loads(text)
-        return bool(data.get("willing"))
+        return bool(data.get("willing", True))
     except Exception as e:
-        client.logger.info(f"[llm:openai] response interest error: {e}")
-        return False
+        client.logger.warning(f"[llm:openai] response interest error: {e}")
+        return True
 
 
 async def _plan_discussion(msg: Any) -> dict:
@@ -527,8 +557,11 @@ async def _plan_discussion(msg: Any) -> dict:
     yday_mem = _memory_json_text(_read_json(yesterday_path))
 
     system = (
-        "You are a digital twin collaborating with another agent to brainstorm strategies. "
-        "Use the context to propose options, converge on the best strategy, and respond clearly. "
+        "You are a digital twin collaborating with another agent to do real, topic-agnostic work. "
+        "Always produce 2–3 distinct options. For each option, include a short risk or tradeoff. "
+        "Then compare options explicitly using general criteria (impact, feasibility, speed, cost) "
+        "and converge on a single best option. End with a concrete next step or question that moves "
+        "the work forward. Avoid domain-specific assumptions; stay general and adaptable. "
         "Return a JSON object with keys: reply, report, lt_memory, st_memory, decision. "
         "report = delta insights for REPORT.md. lt_memory = durable facts for MEMORY.md. "
         "st_memory = short-term notes for today. decision = current best strategy in 1-3 sentences."
@@ -562,8 +595,201 @@ async def _plan_discussion(msg: Any) -> dict:
             "decision": str(data.get("decision", "")).strip(),
         }
     except Exception as e:
-        client.logger.info(f"[llm:openai] plan discussion error: {e}")
+        client.logger.warning(f"[llm:openai] plan discussion error: {e}")
         return {"reply": "", "report": "", "lt_memory": "", "st_memory": "", "decision": ""}
+
+
+def _plan_fallback_prompt() -> str:
+    return (
+        "I’m ready to brainstorm strategies. "
+        "What direction should we start with: positioning, channels, or specific tactics?"
+    )
+
+def _notion_blocks_from_text(text: str, max_chunk: int = 1800) -> list[dict]:
+    def _rich_text_from_md(s: str) -> list[dict]:
+        if not s:
+            return []
+        out: list[dict] = []
+        i = 0
+        bold = False
+        while i < len(s):
+            if s.startswith("**", i):
+                bold = not bold
+                i += 2
+                continue
+            j = s.find("**", i)
+            if j == -1:
+                chunk = s[i:]
+                if chunk:
+                    out.append({
+                        "type": "text",
+                        "text": {"content": chunk},
+                        "annotations": {"bold": bold},
+                    })
+                break
+            chunk = s[i:j]
+            if chunk:
+                out.append({
+                    "type": "text",
+                    "text": {"content": chunk},
+                    "annotations": {"bold": bold},
+                })
+            i = j
+        return out
+
+    def _split_chunks(s: str) -> list[str]:
+        return [s[i:i + max_chunk] for i in range(0, len(s), max_chunk)] if s else []
+
+    def _mk_blocks(block_type: str, content: str, language: Optional[str] = None) -> list[dict]:
+        blocks: list[dict] = []
+        for chunk in _split_chunks(content):
+            if block_type == "code":
+                payload = {"rich_text": [{"type": "text", "text": {"content": chunk}}]}
+                payload["language"] = language or "plain text"
+            else:
+                payload = {"rich_text": _rich_text_from_md(chunk)}
+            blocks.append({
+                "object": "block",
+                "type": block_type,
+                block_type: payload,
+            })
+        return blocks
+
+    blocks: list[dict] = []
+    para_buf: list[str] = []
+    in_code = False
+    code_lang = ""
+    code_buf: list[str] = []
+
+    def _flush_para() -> None:
+        nonlocal para_buf
+        if para_buf:
+            blocks.extend(_mk_blocks("paragraph", "\n".join(para_buf)))
+            para_buf = []
+
+    def _flush_code() -> None:
+        nonlocal code_buf, code_lang
+        if code_buf:
+            blocks.extend(_mk_blocks("code", "\n".join(code_buf), language=code_lang))
+            code_buf = []
+            code_lang = ""
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if stripped == "":
+            if in_code:
+                code_buf.append("")
+            else:
+                _flush_para()
+            continue
+
+        if stripped.startswith("```"):
+            if in_code:
+                _flush_code()
+                in_code = False
+            else:
+                _flush_para()
+                in_code = True
+                code_lang = stripped[3:].strip()
+            continue
+
+        if in_code:
+            code_buf.append(line)
+            continue
+
+        if stripped.startswith("#"):
+            _flush_para()
+            level = len(stripped.split(" ", 1)[0])
+            content = stripped[level:].strip()
+            if content:
+                if level == 1:
+                    blocks.extend(_mk_blocks("heading_1", content))
+                elif level == 2:
+                    blocks.extend(_mk_blocks("heading_2", content))
+                else:
+                    blocks.extend(_mk_blocks("heading_3", content))
+            continue
+
+        if stripped.startswith("> "):
+            _flush_para()
+            blocks.extend(_mk_blocks("quote", stripped[2:].strip()))
+            continue
+
+        if stripped.startswith(("- ", "* ")):
+            _flush_para()
+            blocks.extend(_mk_blocks("bulleted_list_item", stripped[2:].strip()))
+            continue
+
+        num_dot = stripped.split(" ", 1)[0]
+        if num_dot.endswith(".") and num_dot[:-1].isdigit():
+            content = stripped[len(num_dot):].strip()
+            if content:
+                _flush_para()
+                blocks.extend(_mk_blocks("numbered_list_item", content))
+                continue
+
+        para_buf.append(line)
+
+    if in_code:
+        _flush_code()
+    _flush_para()
+    return blocks
+
+
+async def _sync_report_to_notion(report_text: str) -> None:
+    if not NOTION_ENABLED:
+        return
+    if not NOTION_TOKEN or not NOTION_PAGE_ID:
+        client.logger.warning("[notion] enabled but NOTION_TOKEN/NOTION_PAGE_ID missing")
+        return
+
+    blocks = _notion_blocks_from_text(report_text)
+    if not blocks:
+        client.logger.debug("[notion] skip empty report")
+        return
+
+    block_ids: list[str] = []
+    try:
+        resp = await notion_list_blocks.call()
+        data = resp.response_json or {}
+        block_ids.extend([b.get("id") for b in data.get("results", []) if isinstance(b, dict) and b.get("id")])
+        while data.get("has_more") and data.get("next_cursor"):
+            cursor = data.get("next_cursor")
+            resp = await notion_list_blocks_with_cursor.call({"start_cursor": cursor})
+            data = resp.response_json or {}
+            block_ids.extend([b.get("id") for b in data.get("results", []) if isinstance(b, dict) and b.get("id")])
+    except Exception as e:
+        client.logger.warning(f"[notion] list blocks failed: {e}")
+        return
+
+    sem = asyncio.Semaphore(3)
+
+    async def _delete_block(block_id: str) -> None:
+        async with sem:
+            try:
+                resp = await notion_delete_block.call({"block_id": block_id})
+                if resp.status_code == 429:
+                    retry_after = 1
+                    try:
+                        retry_after = int(resp.response_json.get("retry_after", 1)) if isinstance(resp.response_json, dict) else 1
+                    except Exception:
+                        retry_after = 1
+                    await asyncio.sleep(max(1, retry_after))
+                    await notion_delete_block.call({"block_id": block_id})
+            except Exception as e:
+                client.logger.warning(f"[notion] delete block failed id={block_id}: {e}")
+
+    await asyncio.gather(*[_delete_block(bid) for bid in block_ids])
+
+    payload = json.dumps({"children": blocks}, ensure_ascii=False)
+    try:
+        resp = await notion_append_blocks.call({"payload": payload})
+        if not resp.ok:
+            client.logger.warning(f"[notion] append failed status={resp.status_code}")
+    except Exception as e:
+        client.logger.warning(f"[notion] append blocks failed: {e}")
 
 
 async def _update_plan_memory(report: str, lt_memory: str, st_memory: str) -> None:
@@ -607,7 +833,7 @@ async def _compact_markdown(path: Path, existing: str, incoming: str) -> str:
         text = _extract_text_from_openai_response(s.response_json)
         return text.strip()
     except Exception as e:
-        client.logger.info(f"[llm:openai] compaction error: {e}")
+        client.logger.warning(f"[llm:openai] compaction error: {e}")
         return ""
 
 
@@ -623,6 +849,8 @@ async def _append_or_compact(path: Path, new_text: str, token_limit: int) -> Non
     compacted = await _compact_markdown(path, existing, new_text)
     if compacted:
         _write_md(path, compacted)
+        if path.name == "REPORT.md":
+            await _sync_report_to_notion(compacted)
     else:
         _append_md(path, new_text)
 
@@ -700,13 +928,13 @@ async def extract_memory(msg: dict) -> dict:
         })
         text = _extract_text_from_openai_response(s.response_json)
         if not text:
-            client.logger.info(f"[llm:openai] empty response payload: {s.response_json}")
+            client.logger.warning(f"[llm:openai] empty response payload: {s.response_json}")
             raise ValueError("empty openai response text")
         return json.loads(text)
     except Exception as e:
-        client.logger.info(f"[llm:openai] extraction error: {e}")
+        client.logger.warning(f"[llm:openai] extraction error: {e}")
         try:
-            client.logger.info(f"[llm:openai] raw response: {s.response_json}")
+            client.logger.debug(f"[llm:openai] raw response: {s.response_json}")
         except Exception:
             pass
         return {
@@ -735,7 +963,7 @@ async def validate(msg: Any) -> Optional[dict]:
         return
 
     if "from" not in content:
-        client.logger.info("[hook:recv] missing content.from")
+        client.logger.warning("[hook:recv] missing content.from")
         return
 
     return content
@@ -757,13 +985,13 @@ async def download_states(possible_states: list[Node]) -> None:
     new_states = [s for s in incoming if s not in states]
     if not new_states:
         viz.push_states(states)
-        client.logger.info(f"[states] incoming={incoming}")
-        client.logger.info(f"[states] updated={states} hello_in={ 'hello' in states }")
+        client.logger.debug(f"[states] incoming={incoming}")
+        client.logger.debug(f"[states] updated={states} hello_in={ 'hello' in states }")
         return states
     states = new_states
     viz.push_states(states)
-    client.logger.info(f"[states] incoming={incoming}")
-    client.logger.info(f"[states] updated={states} hello_in={ 'hello' in states }")
+    client.logger.debug(f"[states] incoming={incoming}")
+    client.logger.debug(f"[states] updated={states} hello_in={ 'hello' in states }")
     return states
 
 
@@ -785,7 +1013,7 @@ async def on_learn_to_hello(msg: Any) -> Event:
         client.logger.info(f"[travel] done in {asyncio.get_event_loop().time()-t0:.2f}s")
         return Move(Trigger.ok)
 
-    client.logger.info(msg)
+    client.logger.debug(msg)
 
     result = await extract_memory(msg)
     # print("[digital_twin] extraction result:")
@@ -818,7 +1046,7 @@ async def on_learn_to_hello(msg: Any) -> Event:
         await _append_or_compact(DAYBYDAY_DIR / f"{date_str}.md", st_memory, token_limit=600)
 
     if heartbeat:
-        client.logger.info(f"[heartbeat] {heartbeat}")
+        client.logger.debug(f"[heartbeat] {heartbeat}")
 
     if follow_up:
         async with follow_up_lock:
@@ -831,7 +1059,8 @@ async def on_learn_to_hello(msg: Any) -> Event:
 
 @client.receive(route="hello --> plan")
 async def on_hello_to_plan(msg: Any) -> Event:
-    client.logger.info("[send on hello] triggered; building plan request")
+    global LAST_REQUEST_TS, LAST_REQUEST_ID, WAITING_FOR_RESPONSE, ACTIVE_CHAIN_NONCE, EXPECTED_CHAIN_NONCE
+    client.logger.debug("[recv hello->plan] handler invoked")
 
     if not isinstance(msg, dict):
         return Stay(Trigger.ok)
@@ -842,42 +1071,81 @@ async def on_hello_to_plan(msg: Any) -> Event:
 
     intent = msg.get("intent")
     if intent == "request":
-        their_goals = msg.get("goals") or _message_text(msg)
-        our_goals = _read_text(WORKSPACE_DIR / "GOALS.md")
-        align, rationale = await _assess_goal_alignment(str(their_goals), our_goals)
-        if align:
-            plan = await _plan_discussion(msg)
-            await _update_plan_memory(plan.get("report", ""), plan.get("lt_memory", ""), plan.get("st_memory", ""))
-            decision = plan.get("decision", "")
-            reply = plan.get("reply", "")
-            msg_text = "I think our goals align and I'd like to discuss."
-            if rationale:
-                msg_text = f"{msg_text} {rationale}"
-            if decision:
-                msg_text = f"{msg_text} Initial strategy: {decision}"
-            if reply:
-                msg_text = f"{msg_text}\n\n{reply}"
-            async with negotiation_lock:
-                NEGOTIATION_QUEUE.append({
-                    "to": sender,
-                    "assessment": rationale,
-                    "their_goals": str(their_goals),
-                    "message": msg_text,
-                })
-            if reply or decision:
-                plan_text = reply or ""
+        async with request_arbitration_lock:
+            their_ts = msg.get("req_ts")
+            their_id = msg.get("req_id")
+            their_next_nonce = msg.get("next_nonce")
+            try:
+                their_ts_val = float(their_ts) if their_ts is not None else None
+            except Exception:
+                their_ts_val = None
+            client.logger.info(f"[recv hello:req] from={sender} req_id={their_id} ts={their_ts_val} ours={LAST_REQUEST_TS} next_nonce={their_next_nonce}")
+
+            # If we already locked onto a chain, ignore other requests.
+            if (ACTIVE_CHAIN_NONCE or EXPECTED_CHAIN_NONCE) and their_next_nonce not in (ACTIVE_CHAIN_NONCE, EXPECTED_CHAIN_NONCE):
+                client.logger.info(f"[nonce] ignore request next={their_next_nonce} active={ACTIVE_CHAIN_NONCE} expected={EXPECTED_CHAIN_NONCE}")
+                return Stay(Trigger.ok)
+
+            # If their request is after ours, we yield: move to plan and wait for response.
+            if LAST_REQUEST_TS is not None and their_ts_val is not None:
+                if their_ts_val > LAST_REQUEST_TS:
+                    WAITING_FOR_RESPONSE = True
+                    EXPECTED_CHAIN_NONCE = str(their_next_nonce) if their_next_nonce else None
+                    client.logger.info(f"[arb] yield (their_ts > our_ts) their={their_ts_val} ours={LAST_REQUEST_TS}")
+                    return Move(Trigger.ok)
+                if their_ts_val == LAST_REQUEST_TS and their_id and LAST_REQUEST_ID and their_id > LAST_REQUEST_ID:
+                    WAITING_FOR_RESPONSE = True
+                    EXPECTED_CHAIN_NONCE = str(their_next_nonce) if their_next_nonce else None
+                    client.logger.info(f"[arb] yield (tie-break) their_id>{LAST_REQUEST_ID}")
+                    return Move(Trigger.ok)
+
+            their_goals = msg.get("goals") or _message_text(msg)
+            our_goals = _read_text(WORKSPACE_DIR / "GOALS.md")
+            align, rationale = await _assess_goal_alignment(str(their_goals), our_goals)
+            client.logger.info(f"[arb] alignment={align} rationale_len={len(rationale)}")
+            if align:
+                WAITING_FOR_RESPONSE = True
+                ACTIVE_CHAIN_NONCE = str(their_next_nonce) if their_next_nonce else None
+                plan = await _plan_discussion(msg)
+                await _update_plan_memory(plan.get("report", ""), plan.get("lt_memory", ""), plan.get("st_memory", ""))
+                decision = plan.get("decision", "")
+                reply = plan.get("reply", "")
+                client.logger.debug(f"[plan] decision_len={len(decision)} reply_len={len(reply)}")
+                msg_text = "I think our goals align and I'd like to discuss."
+                if rationale:
+                    msg_text = f"{msg_text} {rationale}"
                 if decision:
-                    plan_text = f"{plan_text}\n\nCurrent best strategy: {decision}".strip()
-                if plan_text:
-                    async with plan_reply_lock:
-                        PLAN_REPLY_QUEUE.append({"to": sender, "message": plan_text})
-            await asyncio.sleep(1.0)
-            return Move(Trigger.ok)
-        return Stay(Trigger.ok)
+                    msg_text = f"{msg_text} Initial strategy: {decision}"
+                if reply:
+                    msg_text = f"{msg_text}\n\n{reply}"
+                current_nonce = ACTIVE_CHAIN_NONCE or _new_nonce()
+                next_nonce = _new_nonce()
+                ACTIVE_CHAIN_NONCE = next_nonce
+                async with negotiation_lock:
+                    NEGOTIATION_QUEUE.append({
+                        "to": sender,
+                        "assessment": rationale,
+                        "their_goals": str(their_goals),
+                        "message": msg_text,
+                        "current_nonce": current_nonce,
+                        "next_nonce": next_nonce,
+                    })
+                return Move(Trigger.ok)
+            return Stay(Trigger.ok)
 
     if intent == "response":
-        if msg.get("to") != AGENT_ID_OBJ:
+        to = msg.get("to")
+        if to not in (AGENT_ID_OBJ, AGENT_ID, AGENT_ID_OBJ.get("name")):
             return Stay(Trigger.ok)
+        current_nonce = msg.get("current_nonce")
+        next_nonce = msg.get("next_nonce")
+        client.logger.info(f"[recv hello:resp] from={sender} to={to} waiting={WAITING_FOR_RESPONSE} cur={current_nonce} next={next_nonce}")
+        if EXPECTED_CHAIN_NONCE and current_nonce != EXPECTED_CHAIN_NONCE:
+            client.logger.info(f"[nonce] ignore response cur={current_nonce} expected={EXPECTED_CHAIN_NONCE}")
+            return Stay(Trigger.ok)
+        ACTIVE_CHAIN_NONCE = str(next_nonce) if next_nonce else None
+        EXPECTED_CHAIN_NONCE = None
+        WAITING_FOR_RESPONSE = False
         willing = await _assess_response_interest(_message_text(msg))
         if willing:
             plan = await _plan_discussion(msg)
@@ -886,12 +1154,55 @@ async def on_hello_to_plan(msg: Any) -> Event:
             decision = plan.get("decision", "")
             if decision:
                 reply = f"{reply}\n\nCurrent best strategy: {decision}".strip()
-            if reply:
-                async with plan_reply_lock:
-                    PLAN_REPLY_QUEUE.append({"to": sender, "message": reply})
-            await asyncio.sleep(1.0)
-            return Move(Trigger.ok)
-        return Stay(Trigger.ok)
+            if not reply:
+                reply = _plan_fallback_prompt()
+            current_nonce = ACTIVE_CHAIN_NONCE or _new_nonce()
+            next_nonce = _new_nonce()
+            ACTIVE_CHAIN_NONCE = next_nonce
+            async with plan_reply_lock:
+                PLAN_REPLY_QUEUE.append({
+                    "intent": "plan",
+                    "to": sender,
+                    "message": reply,
+                    "current_nonce": current_nonce,
+                    "next_nonce": next_nonce,
+                })
+            client.logger.debug(f"[plan] queued response plan reply_len={len(reply)}")
+        return Move(Trigger.ok)
+
+    if intent == "plan":
+        if not isinstance(sender, dict) or sender.get("type") != "digital_twin":
+            return Stay(Trigger.ok)
+        current_nonce = msg.get("current_nonce")
+        next_nonce = msg.get("next_nonce")
+        client.logger.info(f"[recv hello:plan] from={sender} cur={current_nonce} next={next_nonce} active={ACTIVE_CHAIN_NONCE}")
+        if ACTIVE_CHAIN_NONCE and current_nonce and current_nonce != ACTIVE_CHAIN_NONCE:
+            client.logger.info(f"[nonce] ignore plan cur={current_nonce} active={ACTIVE_CHAIN_NONCE}")
+            return Stay(Trigger.ok)
+        if next_nonce:
+            ACTIVE_CHAIN_NONCE = str(next_nonce)
+        plan = await _plan_discussion(msg)
+        await _update_plan_memory(plan.get("report", ""), plan.get("lt_memory", ""), plan.get("st_memory", ""))
+        reply = plan.get("reply", "")
+        decision = plan.get("decision", "")
+        if decision:
+            reply = f"{reply}\n\nCurrent best strategy: {decision}".strip()
+        if not reply:
+            reply = _plan_fallback_prompt()
+        if reply:
+            current_nonce = ACTIVE_CHAIN_NONCE or _new_nonce()
+            next_nonce = _new_nonce()
+            ACTIVE_CHAIN_NONCE = next_nonce
+            async with plan_reply_lock:
+                PLAN_REPLY_QUEUE.append({
+                    "intent": "plan",
+                    "to": sender,
+                    "message": reply,
+                    "current_nonce": current_nonce,
+                    "next_nonce": next_nonce,
+                })
+        client.logger.debug(f"[plan] queued reply_len={len(reply)} queue_size={len(PLAN_REPLY_QUEUE)}")
+        return Move(Trigger.ok)
 
     return Stay(Trigger.ok)
 
@@ -900,20 +1211,44 @@ async def on_hello_to_plan(msg: Any) -> Event:
 async def on_plan(msg: Any) -> Event:
     if not isinstance(msg, dict):
         return Stay(Trigger.ok)
+    global ACTIVE_CHAIN_NONCE
+    intent = msg.get("intent")
+    if intent not in ("plan", "response"):
+        client.logger.debug(f"[plan] ignore intent={intent}")
+        return Stay(Trigger.ok)
+    current_nonce = msg.get("current_nonce")
+    next_nonce = msg.get("next_nonce")
+    client.logger.info(f"[recv plan] from={msg.get('from')} text_len={len(_message_text(msg))} cur={current_nonce} next={next_nonce} active={ACTIVE_CHAIN_NONCE}")
+    if ACTIVE_CHAIN_NONCE and current_nonce and current_nonce != ACTIVE_CHAIN_NONCE:
+        client.logger.info(f"[nonce] ignore plan cur={current_nonce} active={ACTIVE_CHAIN_NONCE}")
+        return Stay(Trigger.ok)
+    if next_nonce:
+        ACTIVE_CHAIN_NONCE = str(next_nonce)
     plan = await _plan_discussion(msg)
     await _update_plan_memory(plan.get("report", ""), plan.get("lt_memory", ""), plan.get("st_memory", ""))
     reply = plan.get("reply", "")
     decision = plan.get("decision", "")
     if decision:
         reply = f"{reply}\n\nCurrent best strategy: {decision}".strip()
+    if not reply:
+        reply = _plan_fallback_prompt()
     if reply:
+        current_nonce = ACTIVE_CHAIN_NONCE or _new_nonce()
+        next_nonce = _new_nonce()
+        ACTIVE_CHAIN_NONCE = next_nonce
         async with plan_reply_lock:
-            PLAN_REPLY_QUEUE.append({"to": msg.get("from"), "message": reply})
+            PLAN_REPLY_QUEUE.append({
+                "intent": "plan",
+                "to": msg.get("from"),
+                "message": reply,
+                "current_nonce": current_nonce,
+                "next_nonce": next_nonce,
+            })
+    client.logger.debug(f"[plan] queued reply_len={len(reply)} queue_size={len(PLAN_REPLY_QUEUE)}")
     return Stay(Trigger.ok)
 
 @client.send(route="learn --> hello", on_actions={Action.STAY}, on_triggers={Trigger.ok})
 async def send_follow_up() -> Optional[dict]:
-    await asyncio.sleep(0.5)
     async with follow_up_lock:
         if not FOLLOW_UP_QUEUE:
             return None
@@ -923,58 +1258,61 @@ async def send_follow_up() -> Optional[dict]:
     return item
 
 async def _build_plan_request() -> Optional[dict]:
-    global _cached_plan_request, _cached_goals_mtime
-    client.logger.info("[send on hello] triggered; building plan request")
+    global LAST_REQUEST_TS, LAST_REQUEST_ID, ACTIVE_CHAIN_NONCE, EXPECTED_CHAIN_NONCE
+    client.logger.debug("[send plan-req] build request")
 
     now = asyncio.get_event_loop().time()
-    await asyncio.sleep(1.0)
     goals_path = WORKSPACE_DIR / "GOALS.md"
     goals_text = _read_text(goals_path)
     summary = await _summarize_goals_text(goals_text)
-    client.logger.info(f"[plan req] now={now:.3f}")
-    client.logger.info(f"[plan req] goals_text_len={len(goals_text)}")
-    client.logger.info(f"[plan req] summary_len={len(summary) if summary else 0}")
+    client.logger.debug(f"[plan req] now={now:.3f}")
+    client.logger.debug(f"[plan req] goals_text_len={len(goals_text)}")
+    client.logger.debug(f"[plan req] summary_len={len(summary) if summary else 0}")
     if not summary:
         if not goals_text.strip():
             summary = "No goals provided yet."
         else:
             summary = "Goals were provided but summarization returned empty."
-    payload = {
+    req_ts = time.time()
+    req_id = f"{AGENT_ID}-{int(req_ts * 1000)}-{random.randint(1000, 9999)}"
+    LAST_REQUEST_TS = req_ts
+    LAST_REQUEST_ID = req_id
+    current_nonce = _new_nonce()
+    next_nonce = _new_nonce()
+    # Reset chain on new outbound request
+    ACTIVE_CHAIN_NONCE = None
+    EXPECTED_CHAIN_NONCE = None
+    client.logger.info(f"[req] build req_id={req_id} ts={req_ts:.3f}")
+    return {
         "intent": "request",
         "to": None,
         "message": f"Is any agent available to help with these goals? {summary}",
         "goals": summary,
+        "req_ts": req_ts,
+        "req_id": req_id,
+        "current_nonce": current_nonce,
+        "next_nonce": next_nonce,
     }
-    _cached_plan_request = payload
-    _cached_goals_mtime = _file_mtime(goals_path)
-    return payload
 
 
 @client.send(route="learn --> hello", on_actions={Action.MOVE}, on_triggers={Trigger.ok})
 async def send_plan_request_on_hello() -> Optional[dict]:
-    await asyncio.sleep(0.1)
     return await _build_plan_request()
 
 
 @client.send(route="hello")
 async def send_plan_request_while_idle() -> Optional[dict]:
-    global _cached_plan_request, _cached_goals_mtime
-    client.logger.info(f"[send idle] states={states} hello_in={'hello' in states}")
-    await asyncio.sleep(0.5)
+    client.logger.debug(f"[send idle] states={states} hello_in={'hello' in states}")
+    await asyncio.sleep(1.0)
     if "hello" not in states:
         return None
-    goals_path = WORKSPACE_DIR / "GOALS.md"
-    current_mtime = _file_mtime(goals_path)
-    if _cached_plan_request and _cached_goals_mtime == current_mtime:
-        return _cached_plan_request
-    _cached_plan_request = None
-    _cached_goals_mtime = None
+    if WAITING_FOR_RESPONSE or ACTIVE_CHAIN_NONCE or EXPECTED_CHAIN_NONCE:
+        return None
     return await _build_plan_request()
 
 
 @client.send(route="hello --> plan", on_actions={Action.MOVE}, on_triggers={Trigger.ok})
 async def send_plan_response() -> Optional[dict]:
-    await asyncio.sleep(0.5)
     async with negotiation_lock:
         if not NEGOTIATION_QUEUE:
             return None
@@ -989,21 +1327,44 @@ async def send_plan_response() -> Optional[dict]:
         "intent": "response",
         "to": item["to"],
         "message": msg,
+        "current_nonce": item.get("current_nonce"),
+        "next_nonce": item.get("next_nonce"),
     }
 
 
-@client.send(route="plan", on_actions={Action.STAY}, on_triggers={Trigger.ok})
+@client.send(route="plan", on_actions={Action.STAY, Action.MOVE}, on_triggers={Trigger.ok})
 async def send_plan_message() -> Optional[dict]:
-    await asyncio.sleep(0.5)
     async with plan_reply_lock:
         if not PLAN_REPLY_QUEUE:
             return None
         item = PLAN_REPLY_QUEUE.pop(0)
     if not item or not item.get("message"):
         return None
+    client.logger.debug(f"[send plan] to={item.get('to')} len={len(item.get('message',''))} cur={item.get('current_nonce')} next={item.get('next_nonce')}")
     return {
+        "intent": "plan",
         "to": item.get("to"),
         "message": item["message"],
+        "current_nonce": item.get("current_nonce"),
+        "next_nonce": item.get("next_nonce"),
+    }
+
+
+@client.send(route="hello --> plan", on_actions={Action.MOVE}, on_triggers={Trigger.ok})
+async def send_plan_message_on_transition() -> Optional[dict]:
+    async with plan_reply_lock:
+        if not PLAN_REPLY_QUEUE:
+            return None
+        item = PLAN_REPLY_QUEUE.pop(0)
+    if not item or not item.get("message"):
+        return None
+    client.logger.debug(f"[send plan:transition] to={item.get('to')} len={len(item.get('message',''))} cur={item.get('current_nonce')} next={item.get('next_nonce')}")
+    return {
+        "intent": "plan",
+        "to": item.get("to"),
+        "message": item["message"],
+        "current_nonce": item.get("current_nonce"),
+        "next_nonce": item.get("next_nonce"),
     }
 
 
