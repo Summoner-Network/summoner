@@ -168,7 +168,7 @@ def _ensure_workspace() -> None:
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     DAYBYDAY_DIR.mkdir(parents=True, exist_ok=True)
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    for name in ["SOUL.md", "USER.md", "MEMORY.md", "GOALS.md", "SELF.md", "REPORT.md", "HEARTBEAT.md"]:
+    for name in ["SOUL.md", "USER.md", "MEMORY.md", "GOALS.md", "SELF.md", "REPORT.md"]:
         path = WORKSPACE_DIR / name
         if not path.exists():
             path.write_text("", encoding="utf-8")
@@ -456,6 +456,8 @@ async def _summarize_goals_text(goals_text: str) -> str:
 
 
 async def _assess_goal_alignment(their_goals: str, our_goals: str) -> tuple[bool, str]:
+    if not (their_goals or "").strip() or not (our_goals or "").strip():
+        return True, ""
     system = (
         "You are assessing whether two agents' goals are compatible for collaboration. "
         "Return a JSON object with keys: align (true/false), rationale (string)."
@@ -467,17 +469,27 @@ async def _assess_goal_alignment(their_goals: str, our_goals: str) -> tuple[bool
         f"{their_goals}\n"
     )
     try:
-        s = await openai_client.call({
-            "model_id": MODEL_ID,
-            "system": system,
-            "user": user,
-        })
+        s = await asyncio.wait_for(
+            openai_client.call({
+                "model_id": MODEL_ID,
+                "system": system,
+                "user": user,
+            }),
+            timeout=6.0,
+        )
         text = _extract_text_from_openai_response(s.response_json)
         data = json.loads(text)
-        return bool(data.get("align")), str(data.get("rationale", "")).strip()
+        align = bool(data.get("align"))
+        rationale = str(data.get("rationale", "")).strip()
+        if align:
+            return True, rationale
+        conflict_words = ("conflict", "incompatible", "opposed", "mutually exclusive", "clash")
+        if any(w in rationale.lower() for w in conflict_words):
+            return False, rationale
+        return True, rationale
     except Exception as e:
         client.logger.info(f"[llm:openai] alignment error: {e}")
-        return False, ""
+        return True, ""
 
 
 async def _assess_response_interest(response_text: str) -> bool:
@@ -859,6 +871,7 @@ async def on_hello_to_plan(msg: Any) -> Event:
                 if plan_text:
                     async with plan_reply_lock:
                         PLAN_REPLY_QUEUE.append({"to": sender, "message": plan_text})
+            await asyncio.sleep(1.0)
             return Move(Trigger.ok)
         return Stay(Trigger.ok)
 
@@ -876,6 +889,7 @@ async def on_hello_to_plan(msg: Any) -> Event:
             if reply:
                 async with plan_reply_lock:
                     PLAN_REPLY_QUEUE.append({"to": sender, "message": reply})
+            await asyncio.sleep(1.0)
             return Move(Trigger.ok)
         return Stay(Trigger.ok)
 
