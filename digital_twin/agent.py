@@ -184,6 +184,18 @@ def _refresh_report_snapshot() -> None:
         _report_snapshot["report"] = report
 
 
+def _start_report_refresher(interval_s: float = 2.0) -> None:
+    def _worker():
+        while True:
+            try:
+                _refresh_report_snapshot()
+            except Exception:
+                pass
+            time.sleep(interval_s)
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
 def start_report_dashboard(
     port_range: tuple[int, int] = (4567, 5567),
     tries: int = 40
@@ -561,7 +573,8 @@ async def _compact_markdown(path: Path, existing: str, incoming: str) -> str:
         "You are a memory compaction module. "
         "Rewrite the content as a polished Markdown document with clear sections. "
         "Remove duplicates, keep factual accuracy, and preserve all important details. "
-        "Be concise. Output Markdown only."
+        "Be concise. Output Markdown only. "
+        "Do not use fenced code blocks (```) and do not include the word 'markdown'."
     )
     user = (
         f"Target file: {path.name}\n\n"
@@ -841,6 +854,13 @@ async def on_hello_to_plan(msg: Any) -> Event:
                     "their_goals": str(their_goals),
                     "message": msg_text,
                 })
+            if reply or decision:
+                plan_text = reply or ""
+                if decision:
+                    plan_text = f"{plan_text}\n\nCurrent best strategy: {decision}".strip()
+                if plan_text:
+                    async with plan_reply_lock:
+                        PLAN_REPLY_QUEUE.append({"to": sender, "message": plan_text})
             return Move(Trigger.ok)
         return Stay(Trigger.ok)
 
@@ -848,7 +868,18 @@ async def on_hello_to_plan(msg: Any) -> Event:
         if msg.get("to") != AGENT_ID_OBJ:
             return Stay(Trigger.ok)
         willing = await _assess_response_interest(_message_text(msg))
-        return Move(Trigger.ok) if willing else Stay(Trigger.ok)
+        if willing:
+            plan = await _plan_discussion(msg)
+            await _update_plan_memory(plan.get("report", ""), plan.get("lt_memory", ""), plan.get("st_memory", ""))
+            reply = plan.get("reply", "")
+            decision = plan.get("decision", "")
+            if decision:
+                reply = f"{reply}\n\nCurrent best strategy: {decision}".strip()
+            if reply:
+                async with plan_reply_lock:
+                    PLAN_REPLY_QUEUE.append({"to": sender, "message": reply})
+            return Move(Trigger.ok)
+        return Stay(Trigger.ok)
 
     return Stay(Trigger.ok)
 
@@ -994,6 +1025,7 @@ if __name__ == "__main__":
 
     _ensure_workspace()
     _refresh_report_snapshot()
+    _start_report_refresher()
     report_server, report_port = start_report_dashboard()
     webbrowser.open(f"http://127.0.0.1:{report_port}")
 
