@@ -1,210 +1,203 @@
-# From One Agent to Many: An Intro to Summoner
+<p align="center">
+  <a href="https://summoner.org">
+    <img src="https://github.com/Summoner-Network/.github/blob/main/img/summoner_intro_rounded.png" alt="Summoner Logo" width="250"/>
+  </a>
+</p>
 
-This repo is a seminar walk-through that starts with a single agent and scales to interacting populations, flow-graphs, stateful routing, and (in later examples) travel between servers.
+<h1 align="center">Summoner</h1>
 
-## Prerequisites
+<p align="center">
+  <strong>The coordination protocol for autonomous AI agents</strong><br>
+  <em>Build, run, and coordinate agents across machines and organizations over a WAN</em>
+</p>
 
-- Git
-- Python 3.10+ (3.11 recommended)
-- (Optional) Rust toolchain (`rustup`) if you want the Rust server option
+<p align="center">
+  <a href="https://github.com/Summoner-Network/summoner/stargazers"><img alt="GitHub stars" src="https://img.shields.io/badge/stars-⭐_star_this_repo-yellow?style=flat-square"></a>
+  <a href="https://github.com/Summoner-Network/summoner-agents"><img alt="Agent blueprints" src="https://img.shields.io/badge/agent_blueprints-58-blue?style=flat-square"></a>
+  <a href="https://discord.gg/NnrBJwFtEn"><img alt="Discord" src="https://img.shields.io/discord/1348699433365147668?style=flat-square&label=discord&color=5865F2"></a>
+  <a href="https://github.com/Summoner-Network/summoner/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache_2.0-green?style=flat-square"></a>
+  <a href="https://www.python.org/"><img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white"></a>
+</p>
 
-## Quick start
+<p align="center">
+  <a href="https://summoner.org">Website</a> · 
+  <a href="https://github.com/Summoner-Network/summoner-docs">Docs</a> · 
+  <a href="https://github.com/Summoner-Network/summoner-agents">Agent Blueprints</a> · 
+  <a href="https://discord.gg/NnrBJwFtEn">Discord</a> · 
+  <a href="https://twitter.com/SummonerNetwork">Twitter</a>
+</p>
+
+---
+
+Summoner is an open protocol and SDK for **networked AI agents**. Most agent frameworks coordinate reasoning inside a single process or organization. Summoner coordinates **independent agents** — running as separate processes — that connect to shared relay servers, like players joining an MMO world. Agents can **travel between servers**, **form peer relationships**, and **coordinate across organizational boundaries**, all with cryptographic identity and behavior-based reputation.
+
+Python SDK. Rust server. No central orchestrator. Your agents, your code, your network.
+
+<p align="center">
+  <img width="600px" src="https://github.com/Summoner-Network/summoner-agents/blob/main/assets/mov2gif/gifs/demo_merchants_framed.gif" alt="Multi-agent negotiation demo"/>
+  <br>
+  <em>Two agents negotiating a deal via cryptographic handshake — one of 58 ready-to-run blueprints</em>
+</p>
+
+## Quickstart
+
+Run two agents and watch them interact.
+
+**1. Clone and install**
 
 ```bash
-git clone https://github.com/Summoner-Network/learn-summoner.git
-cd learn-summoner
+git clone https://github.com/Summoner-Network/summoner-agents.git
+cd summoner-agents
+source build_sdk.sh setup        # creates venv, installs SDK + Rust server
+pip install -r agents/agent_EchoAgent_0/requirements.txt
 ```
 
-Most examples use a shared seminar server. The default in many examples is:
-
-* **Seminar server:** `187.77.102.80:8888`
-
-If your seminar host gives you a different host/port, update the example's `client.run(host=..., port=...)` call or the referenced config.
-
-## Installation
-
-### POSIX (macOS, Linux) using Bash
-
-First install:
+**2. Start the relay** (Terminal A)
 
 ```bash
-source build_sdk.sh setup --server python && bash install_requirements.sh
-# or, if rustup is installed:
-source build_sdk.sh setup && bash install_requirements.sh
-```
-
-Reset (clean environment):
-
-```bash
-source build_sdk.sh reset --server python && bash install_requirements.sh
-# or, if rustup is installed:
-source build_sdk.sh reset && bash install_requirements.sh
-```
-
-If `source build_sdk.sh setup/reset` does not work in your shell:
-
-```bash
-bash build_sdk.sh setup   # or: bash build_sdk.sh reset
 source venv/bin/activate
-bash install_requirements.sh
-```
-
-### Windows (PowerShell)
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\build_sdk_on_windows.ps1 setup
-.\install_requirements_on_windows.ps1
-```
-
-## How to run the seminar examples
-
-All examples live under `learn/`. Run them from the repo root.
-
-### Template (sanity check)
-
-This should open a browser window showing an empty flow graph:
-
-```bash
-python learn/template/agent.py
-```
-
-### Example 1 (minimal receive routes)
-
-You should see an empty graph. This is a minimal “I can connect and respond” agent:
-
-```bash
-python learn/example_1/agent.py
-```
-
-### Example 8 (simple relationship transitions)
-
-This example introduces relationship transitions like `register -> contact` based on received messages.
-If other agents are connected to the same server, you should see state transitions:
-
-```bash
-python learn/example_8/agent.py
-```
-
-## Traveling between servers (Examples 13 and 14)
-
-Examples 13 and 14 demonstrate a two-step setup:
-
-1. Start an agent on a **local server** (so we can issue commands like `/travel` from a controlled environment).
-2. Trigger **travel** to the **seminar server**, then participate there.
-
-### Example 13 (travel showcase)
-
-Open three terminals:
-
-```bash
-# Terminal 1: start a local server
 python server.py
 ```
 
-```bash
-# Terminal 2: run the traveling agent (starts in "listen" mode locally)
-python learn/example_13/agent.py
-```
+**3. Run an agent** (Terminal B)
 
 ```bash
-# Terminal 3: run the input agent that sends commands/messages
-python agents/agent_InputAgent/agent.py
+source venv/bin/activate
+python agents/agent_EchoAgent_0/agent.py
 ```
 
-In the input agent terminal, type:
+Open a third terminal and run a second agent to see them interact. You now have live, networked agents exchanging messages.
 
-```text
-/travel
+> **Windows?** Use `.\build_sdk_on_windows.ps1 setup` in PowerShell. See [full platform setup](https://github.com/Summoner-Network#-install-essential-dependencies).
+
+## Where to go next
+
+| I want to… | Start here |
+|---|---|
+| **Run agents immediately** | [`summoner-agents`](https://github.com/Summoner-Network/summoner-agents) — 58 ready-to-run blueprints from beginner to expert |
+| **Build my own agent from scratch** | [`summoner-sdk`](https://github.com/Summoner-Network/summoner-sdk) — define a `build.txt` recipe and compose your own SDK |
+| **Learn step by step** | [`learn-summoner`](https://github.com/Summoner-Network/learn-summoner) — seminar from single agent to cross-server travel |
+| **Read the full docs** | [`summoner-docs`](https://github.com/Summoner-Network/summoner-docs) — guides, API reference, architecture |
+| **Hack on core infrastructure** | [`summoner-core`](https://github.com/Summoner-Network/summoner-core) — protocol primitives, Rust server, client runtime |
+| **Use the desktop UI** | [`summoner-desktop`](https://github.com/Summoner-Network/summoner-desktop) — visual interface for launching servers and agents |
+| **Read the protocol spec** | [`summoner-standard`](https://github.com/Summoner-Network/summoner-standard) — formal specification and conformance requirements |
+
+## The programming model
+
+Define behavior with decorators. Summoner handles networking, transport, and concurrency.
+
+```python
+from summoner.client import SummonerClient
+
+class MyAgent(SummonerClient): pass
+
+agent = MyAgent()
+
+# Handle incoming messages
+@agent.receive(route="chat")
+async def on_message(msg: dict) -> None:
+    print(f"Got: {msg}")
+    agent.queue.put_nowait(msg)      # forward to send loop
+
+# Produce outgoing messages
+@agent.send(route="chat")
+async def respond() -> str:
+    msg = await agent.queue.get()
+    return f"Echo: {msg}"
+
+agent.run(host="127.0.0.1", port=8888)
 ```
 
-What you should observe:
+No HTTP server to build. No executor to deploy. No orchestrator in the middle. The Rust relay handles transport, fan-out, and backpressure — your agent just defines behavior.
 
-* The Example 13 agent starts in a **listen** state on your local server.
-* When it receives `/travel`, it connects to the seminar server and begins interacting there.
+## What makes Summoner different
 
-### Example 14 (travel + LLM decisions + dashboard)
+🔁 **Agent mobility** — Agents can `travel_to(host, port)` at runtime, moving between relay servers while preserving identity and resuming conversations.
 
-Example 14 builds on Example 13's orchestration and adds:
+🔐 **Cryptographic identity** — Self-assigned decentralized IDs (DIDs), nonce handshakes, and signed/encrypted messages. Trust is earned through behavior, not granted by a central authority.
 
-* An LLM-generated outside goal (once at startup)
-* LLM-driven decisions for `move` vs `stay`
-* Optional LLM classification for `good/bad/neutral` flags
-* A local dashboard (auto-opened) showing encountered agents and states
+🔄 **True duplex messaging** — `@receive` and `@send` run independently in parallel. Events, queues, and hooks connect them. No request/response bottleneck.
 
-Run the same three-terminal setup:
+🧠 **Explicit state machines** — Routes compose into typed automata with hooks for validation, signing, and replay protection at each transition.
 
-```bash
-# Terminal 1
-python server.py
-```
+🌐 **Relay servers as shared spaces** — Servers are meeting points, not controllers. Agents connect outbound (NAT/firewall friendly) and interact with whoever else is in the room. Any party can run a relay.
 
-```bash
-# Terminal 2
-python learn/example_14/agent.py
-```
+## How Summoner compares
 
-```bash
-# Terminal 3
-python agents/agent_InputAgent/agent.py
-```
+| | **Summoner** | **MCP** (Anthropic) | **A2A** (Google) | **LangGraph** |
+|---|---|---|---|---|
+| **Scope** | SDK + relays for live agent networking | Model-to-tool/data protocol | Agent discovery + server executors | Graph DSL for workflows |
+| **Agent mobility** | Yes (`travel()` / resume) | No | No | N/A (in-process) |
+| **Messaging** | Direct, duplex events; parallel sends | Host-routed | Task/stream over HTTP | In-app node calls |
+| **Orchestration** | In the agent (routes/flows/automata) | Host agent | Host + server executor | App graph engine |
+| **Identity** | Self-assigned DIDs; nonce handshake | Host-managed | Registry/OIDC + Agent Cards | None |
+| **Cross-org** | Designed for untrusted, cross-boundary | Single-organization | Shared enterprise security | Single-process |
 
-Then type:
+Summoner doesn't replace these tools — it **connects them across the network**. Use LangChain for reasoning, CrewAI for task planning, MCP for tool access, and Summoner for the hard part: live, cross-machine agent coordination.
 
-```text
-/travel
-```
+## 58 ready-to-run blueprints
 
-#### Selecting the LLM backend (Example 14)
+The [`summoner-agents`](https://github.com/Summoner-Network/summoner-agents) repo ships agents from beginner to advanced:
 
-Example 14 supports three backends:
+| Category | Examples | What you'll learn |
+|---|---|---|
+| **Core Messaging** | SendAgent, RecvAgent, EchoAgent, StreamAgent | `@send`, `@receive`, `@hook`, LLM streaming |
+| **Chat & Control** | ChatAgent 0–3 | Interactive UI, remote commands, automaton routing |
+| **Feedback** | ReportAgent, ExamAgent | Queued reports, timed Q&A flows |
+| **Graph-Based** | CatArrowAgent, CatTriangleAgent, CatUpdateAgent | State machines, decision flows, supply chain modeling |
+| **Connectors** | ConnectAgent, OrchBridgeAgent | SQLite, LangChain, CrewAI integration |
+| **MCP** | MCPArXivAgent, MCPPubMedAgent, MCPGitHubAgent | MCP tool servers for external services |
+| **Security** | HSAgent, HSSellAgent, HSBuyAgent | Nonce handshakes, DID identity, negotiation |
+| **MMO Game** | GameMasterAgent, GamePlayerAgent | Multiplayer 2D sandbox over the protocol |
+| **DNA** | DNACloneAgent, DNAMergeAgent | Agent cloning, merging, genetic composition |
 
-* OpenAI (default)
-* Claude
-* OpenClaw
+<p align="center">
+  <img width="600px" src="https://github.com/Summoner-Network/summoner-agents/blob/main/assets/mov2gif/gifs/demo_mmo_2_framed.gif" alt="MMO game agents"/>
+  <br>
+  <em>Multiplayer game running entirely over the Summoner protocol</em>
+</p>
 
-Examples:
+### Integrations
 
-```bash
-# OpenAI (default)
-python learn/example_14/agent.py --model openai
+Summoner is the **transport and coordination layer** — your agent code calls whatever LLMs, APIs, and frameworks you already use:
 
-# Claude
-python learn/example_14/agent.py --model claude --model-id claude-3-haiku-20240307
+| Integration | How it works |
+|---|---|
+| **OpenAI / Claude / local LLMs** | Call model APIs directly from `@receive` or `@send` handlers |
+| **LangChain** | Run LangChain chains inside Summoner routes via `OrchBridgeAgent` |
+| **CrewAI** | Route Summoner payloads to CrewAI crews for multi-step reasoning |
+| **MCP** | Connect to any MCP tool server (arXiv, PubMed, GitHub, Notion, Reddit) |
+| **SQLite / databases** | Persistent agent memory via `ConnectAgent` patterns |
 
-# OpenClaw
-python learn/example_14/agent.py --model openclaw --openclaw-agent MyOpenClawAgent
-```
+## Why this exists
 
-Optional: enable LLM-based good/bad/neutral flag inference:
+The future of AI is not single agents running inside a single process. It is **agent populations** coordinating across machines, organizations, and trust boundaries — forming relationships, negotiating outcomes, and building reputation over time.
 
-```bash
-python learn/example_14/agent.py --llm-flags
-```
+Today's frameworks solve the single-organization problem well. But nobody is building the protocol layer for what comes next: autonomous agents that coordinate across the open internet the way web services coordinate over HTTP.
 
-## Common issues
+That's what Summoner is for.
 
-### “Nothing happens” or “no other agents”
+## Contributing
 
-You may be alone on the server. Run multiple agents (in separate terminals) or coordinate with other attendees so you share the same server and port.
+We welcome contributions at every level:
 
-### Port already in use (local server)
+- **🌱 First time?** Check out issues labeled [`good-first-issue`](https://github.com/Summoner-Network/summoner/labels/good-first-issue) — each one includes context and guidance
+- **🧠 Build an agent?** Add it to [`summoner-agents`](https://github.com/Summoner-Network/summoner-agents) — follow the [agent folder structure](https://github.com/Summoner-Network/summoner-agents#desktop-app-compatibility)
+- **🔧 Extend the SDK?** Use the [`extension-template`](https://github.com/Summoner-Network/extension-template) to create a module
+- **📝 Improve docs?** PRs welcome on [`summoner-docs`](https://github.com/Summoner-Network/summoner-docs)
+- **💡 Propose a change?** Open an issue or start a [Discussion](https://github.com/Summoner-Network/summoner/discussions)
 
-Stop the process using the port (usually `server.py`) and rerun, or change the local server port if your setup supports it.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines.
 
-### Environment variables for Example 14
+## Community
 
-Example 14 expects API keys to be available (often via `.env`):
+- 💬 **[Discord](https://discord.gg/NnrBJwFtEn)** — Chat with the team and other builders
+- 🐦 **[Twitter](https://twitter.com/SummonerNetwork)** — Updates and announcements
+- 📧 **[info@summoner.org](mailto:info@summoner.org)** — Reach us directly
 
-* `OPENAI_API_KEY` for OpenAI
-* `ANTHROPIC_API_KEY` for Claude
+---
 
-If keys are missing or invalid, Example 14 falls back to heuristic behavior.
-
-## Suggested seminar flow
-
-1. Template: verify installation and visualize an empty graph
-2. Example 1: connect and respond (basic receive routes)
-3. Example 8: transitions and stateful routing
-4. Example 13: travel between servers
-5. Example 14: LLM-conditioned behavior + dashboard observability
+<p align="center">
+  <strong>If Summoner is useful to you, please consider giving it a ⭐</strong><br>
+  It helps other developers find the project.
+</p>
