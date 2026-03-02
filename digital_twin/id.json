@@ -1,0 +1,5 @@
+{
+"name": "DigitalTwinAgent",
+"description": "An agent that serves as a digital twin, simulating and mirroring the behavior of the user",
+"type": "digital_twin"
+}
