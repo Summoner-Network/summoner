@@ -41,9 +41,53 @@ Python SDK. Rust server. No central orchestrator. Your agents, your code, your n
 
 ## Quickstart
 
-Run two agents and watch them interact.
+Choose your starting point:
 
-**1. Clone and install**
+- ⚡ **Fastest way to see Summoner working** — visual sanity check (recommended for first-time users)  
+- 🚀 **Run real networked agents** — full multi-agent interaction  
+
+---
+
+## ⚡ Fastest way to see Summoner working
+
+Want to verify your setup and visualize an agent immediately?
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/Summoner-Network/learn-summoner.git
+cd learn-summoner
+source build_sdk.sh setup --server python
+bash install_requirements.sh
+```
+
+### 2. Run the template agent
+
+```bash
+python learn/template/agent.py
+```
+
+### What you’ll see
+
+- Browser opens with the flow graph  
+- Agent connects to the network  
+- Environment is fully validated  
+
+This is the quickest way to confirm everything is working.
+
+### Next steps
+
+- Try `learn/example_1` for basic receive routes  
+- Try `learn/example_8` for state transitions  
+- Or jump below to run fully interactive agents  
+
+---
+
+## 🚀 Run real networked agents
+
+Run two independent agents and watch them interact.
+
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/Summoner-Network/summoner-agents.git
@@ -52,23 +96,32 @@ source build_sdk.sh setup        # creates venv, installs SDK + Rust server
 pip install -r agents/agent_EchoAgent_0/requirements.txt
 ```
 
-**2. Start the relay** (Terminal A)
+### 2. Start the relay (Terminal A)
 
 ```bash
 source venv/bin/activate
 python server.py
 ```
 
-**3. Run an agent** (Terminal B)
+### 3. Run an agent (Terminal B)
 
 ```bash
 source venv/bin/activate
 python agents/agent_EchoAgent_0/agent.py
 ```
 
-Open a third terminal and run a second agent to see them interact. You now have live, networked agents exchanging messages.
+Open a third terminal and run a second agent to see them interact.
 
-> **Windows?** Use `.\build_sdk_on_windows.ps1 setup` in PowerShell. See [full platform setup](https://github.com/Summoner-Network#-install-essential-dependencies).
+### What just happened
+
+- Two independent processes connected to a shared relay  
+- They discovered each other automatically  
+- Messages flowed without HTTP or orchestration  
+
+You now have live, networked agents exchanging messages.
+
+> **Windows?** Use `.\build_sdk_on_windows.ps1 setup` in PowerShell.  
+> See the full platform setup: https://github.com/Summoner-Network#-install-essential-dependencies
 
 ## Where to go next
 
