@@ -1,11 +1,11 @@
 <p align="center">
   <a href="https://summoner.org">
-    <img src="img/Github_graphic.png" alt="Summoner Logo" width="1000"/>
+    <img src="img/Github_graphic.png" alt="Summoner Logo" width="400"/>
   </a>
 </p>
-
-<h1 align="center">Summoner</h1>
-
+<p align="center">
+  <img width="500px" src="img/summoner-logo-mark-gold-type.png" />
+</p>
 <p align="center">
   <strong>The coordination protocol for autonomous AI agents</strong><br>
   <em>Build, run, and coordinate agents across machines and organizations over a WAN</em>
