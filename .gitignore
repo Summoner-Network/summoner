@@ -8,6 +8,8 @@ logs/
 digital_twin/workspace/*
 digital_twin/owner_id.json
 *.DS_Store
+agents/*
+!agents/agent_InputAgent
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

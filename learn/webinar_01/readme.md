@@ -1,4 +1,4 @@
-# From One Agent to Many: An Intro to Summoner
+# Webinar 01: From One Agent to Many: An Intro to Summoner
 
 This repo is a seminar walk-through that starts with a single agent and scales to interacting populations, flow-graphs, stateful routing, and (in later examples) travel between servers.
 
