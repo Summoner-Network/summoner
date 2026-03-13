@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -60,6 +61,56 @@ def status_to_str(status_obj: Any) -> str:
     if isinstance(root, str):
         return root
     return str(root)
+
+
+def _is_executable_file(path: Path) -> bool:
+    if not (path.exists() and path.is_file()):
+        return False
+    # On Windows, executability is extension-based; os.access(..., X_OK) is unreliable.
+    if os.name == "nt":
+        return path.suffix.lower() in {".exe", ".cmd", ".bat"} or path.name.lower() == "codex"
+    return os.access(path, os.X_OK)
+
+
+def _discover_codex_bin(cli_value: Optional[str]) -> Optional[str]:
+    if cli_value:
+        return cli_value
+
+    env_value = os.environ.get("CODEX_BIN")
+    if env_value and _is_executable_file(Path(env_value).expanduser()):
+        return env_value
+
+    codex_cmd = "codex.exe" if os.name == "nt" else "codex"
+    on_path = shutil.which(codex_cmd) or shutil.which("codex")
+    if on_path and _is_executable_file(Path(on_path)):
+        return on_path
+
+    home = Path.home()
+    roots: list[Path] = [home]
+    for env_name in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
+        val = os.environ.get(env_name)
+        if val:
+            roots.append(Path(val))
+
+    patterns = [
+        ".vscode/extensions/openai.chatgpt-*/bin/*/codex",
+        ".vscode-insiders/extensions/openai.chatgpt-*/bin/*/codex",
+        ".vscode/extensions/openai.chatgpt-*/bin/*/codex.exe",
+        ".vscode-insiders/extensions/openai.chatgpt-*/bin/*/codex.exe",
+        "AppData/Roaming/Code/extensions/openai.chatgpt-*/bin/*/codex.exe",
+        "AppData/Local/Programs/Microsoft VS Code/resources/app/extensions/openai.chatgpt-*/bin/*/codex.exe",
+        "AppData/Roaming/Code - Insiders/extensions/openai.chatgpt-*/bin/*/codex.exe",
+    ]
+    candidates: list[Path] = []
+    for root in roots:
+        for pattern in patterns:
+            candidates.extend(root.glob(pattern))
+    candidates = [p for p in candidates if _is_executable_file(p)]
+    if candidates:
+        latest = max(candidates, key=lambda p: p.stat().st_mtime)
+        return str(latest)
+
+    return None
 
 
 class InteractiveCodexSummonerAgent:
@@ -189,10 +240,13 @@ class InteractiveCodexSummonerAgent:
             else Path(f".codex_live_collab_history_{safe_name}.txt")
         )
 
+        resolved_codex_bin = _discover_codex_bin(args.codex_bin)
+        self.args.codex_bin = resolved_codex_bin
+
         self.app = AppServerClient(
             config=AppServerConfig(
                 cwd=args.codex_cwd,
-                codex_bin=args.codex_bin,
+                codex_bin=resolved_codex_bin,
             )
         )
 
@@ -1953,8 +2007,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--codex-bin",
-        default=AppServerConfig().codex_bin,
-        help="Path to codex binary. Defaults to bundled SDK binary.",
+        default=None,
+        help="Optional path to codex binary. Auto-detected from CODEX_BIN, PATH, or VS Code extension install.",
     )
     args = parser.parse_args()
 

@@ -1,15 +1,5 @@
 # Two-Agent / Two-Repo Live Demo (5-10 min)
 
-## Installation
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-git clone https://github.com/Summoner-Network/summoner.git
-bash summoner/build_sdk.sh setup --venv ../venv
-python3 -m pip install -r summoner/agent_collab/requirements.txt
-```
-
 ## Demo Story
 
 - `CodexA` owns backend repo: `task-service-api` (FastAPI)
@@ -35,6 +25,16 @@ cd ~/demo/task-service-api && git init
 cd ~/demo/task-portal-web && git init
 ```
 
+Installation in both repos:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+git clone https://github.com/Summoner-Network/summoner.git
+bash summoner/build_sdk.sh setup --venv ../venv
+python3 -m pip install -r summoner/agent_collab/requirements.txt
+```
+
 ## 2) Start Summoner server
 
 Side: Terminal 1
@@ -52,7 +52,7 @@ Side: Terminal 2
 source venv/bin/activate
 python3 summoner/agent_collab/agent.py \
   --host 127.0.0.1 --port 8888 \
-  --name CodexA --model gpt-5 \
+  --name CodexA --model gpt-5.3-codex \
   --workspace-root "$(pwd)" \
   --default-peer CodexB \
   --allowed-peer CodexB \
@@ -69,7 +69,7 @@ Side: Terminal 3
 source venv/bin/activate
 python3 summoner/agent_collab/agent.py \
   --host 127.0.0.1 --port 8888 \
-  --name CodexB --model gpt-5 \
+  --name CodexB --model gpt-5.3-codex \
   --workspace-root "$(pwd)" \
   --default-peer CodexA \
   --allowed-peer CodexA \
@@ -222,7 +222,7 @@ and focus on streamed responses + review/approve workflow.
 - `--codex-cwd`
   - working directory for Codex app-server execution.
 - `--codex-bin`
-  - explicit path to Codex binary.
+  - optional explicit path to Codex binary (normally auto-detected from `CODEX_BIN`, PATH, or VS Code extension install).
 
 ### Workspace awareness
 
