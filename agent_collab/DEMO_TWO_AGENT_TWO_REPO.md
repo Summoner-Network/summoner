@@ -31,7 +31,7 @@ Installation in both repos:
 python3 -m venv venv
 source venv/bin/activate
 git clone https://github.com/Summoner-Network/summoner.git
-bash summoner/build_sdk.sh setup --venv ../venv
+bash summoner/build_sdk.sh setup --server python --venv ../venv 
 python3 -m pip install -r summoner/agent_collab/requirements.txt
 ```
 
