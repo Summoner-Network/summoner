@@ -1,0 +1,13 @@
+# Codex Live Collab agent runtime dependencies
+# Install from this folder with:
+#   python3 -m pip install -r requirements.txt
+
+# Codex Python SDK (provides codex_app_server)
+# Preferred: PyPI package
+# codex-app-server-sdk>=0.2.0
+
+# Fallback if package index is unavailable:
+codex-app-server-sdk @ git+https://github.com/openai/codex.git#subdirectory=sdk/python
+
+# Recommended input backend for robust interactive terminal UX
+prompt_toolkit>=3.0
