@@ -15,6 +15,22 @@ This is designed for a live Zoom walkthrough with visible agent collaboration va
 - Terminal 3: `CodexB` agent (frontend repo)
 - Terminal 4: optional runtime checks (uvicorn / vite)
 
+## 0) Install the Codex CLI (prerequisite)
+
+The agent requires the Codex CLI binary. Install it once via npm:
+
+```bash
+npm i -g @openai/codex
+```
+
+Verify it's on your PATH:
+
+```bash
+codex --version
+```
+
+If you see a version number, you're good. If not, ensure Node.js v18+ is installed and your npm global bin directory is in your `PATH`.
+
 ## 1) One-time shell setup (outside `codex>`)
 
 Side: host shell
